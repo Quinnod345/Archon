@@ -31,6 +31,11 @@ try {
   process.exit(1);
 }
 
+if (!Number.isSafeInteger(COOKIE_MAX_AGE) || COOKIE_MAX_AGE <= 0) {
+  console.error('[auth-service] COOKIE_MAX_AGE must be a positive whole number of seconds.');
+  process.exit(1);
+}
+
 // ── Cookie helpers ─────────────────────────────────────────────────────────────
 function signCookie(value) {
   const sig = createHmac('sha256', COOKIE_SECRET).update(value).digest('base64url');
@@ -47,6 +52,30 @@ function verifyCookie(signed) {
   if (sigBuf.length !== expBuf.length) return null;
   if (!timingSafeEqual(sigBuf, expBuf)) return null; // constant-time
   return value;
+}
+
+// Changing AUTH_USERNAME or AUTH_PASSWORD_HASH changes this value, which ends
+// existing sessions without also rotating COOKIE_SECRET.
+function credentialFingerprint() {
+  return createHmac('sha256', COOKIE_SECRET)
+    .update(`${USERNAME}:${PASSWORD_HASH}`)
+    .digest('base64url')
+    .slice(0, 16);
+}
+
+// Max-Age only tells the browser when to drop the cookie. The signed expiry is
+// what makes /verify refuse a copied cookie after COOKIE_MAX_AGE.
+function issueSessionCookie(nowSec = Math.floor(Date.now() / 1000)) {
+  return signCookie(`authenticated.${nowSec + COOKIE_MAX_AGE}.${credentialFingerprint()}`);
+}
+
+function verifySessionCookie(signed, nowSec = Math.floor(Date.now() / 1000)) {
+  const value = verifyCookie(signed);
+  if (!value) return false;
+  const [kind, exp, fingerprint] = value.split('.');
+  return (
+    kind === 'authenticated' && Number(exp) > nowSec && fingerprint === credentialFingerprint()
+  );
 }
 
 function parseCookies(header) {
@@ -142,8 +171,7 @@ function readBody(req) {
 // GET /verify — Caddy forward_auth calls this for every protected request
 function handleVerify(req, res) {
   const cookies = parseCookies(req.headers['cookie']);
-  const session = verifyCookie(cookies[COOKIE_NAME] ?? '');
-  if (session === 'authenticated') {
+  if (verifySessionCookie(cookies[COOKIE_NAME] ?? '')) {
     res.writeHead(200, { 'X-Auth-User': USERNAME });
     return res.end();
   }
@@ -177,7 +205,7 @@ async function handleLogin(req, res) {
     return res.end(loginPage(encodeURIComponent(safeRd), 'Invalid username or password.'));
   }
 
-  const cookieValue = signCookie('authenticated');
+  const cookieValue = issueSessionCookie();
   res.writeHead(302, {
     Location: safeRd,
     'Set-Cookie': `${COOKIE_NAME}=${cookieValue}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`,
@@ -239,4 +267,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { signCookie, verifyCookie, isSafeRedirect, parseCookies };
+module.exports = {
+  signCookie,
+  verifyCookie,
+  issueSessionCookie,
+  verifySessionCookie,
+  handleVerify,
+  isSafeRedirect,
+  parseCookies,
+};

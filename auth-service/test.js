@@ -47,4 +47,40 @@ const wrongSig = createHmac('sha256', 'wrong-secret').update('authenticated').di
 assert.equal(verifyCookie(`authenticated.${wrongSig}`), null, 'wrong secret returns null');
 
 console.log('signCookie/verifyCookie: all assertions passed');
+
+// ── issueSessionCookie / verifySessionCookie ───────────────────────────────
+const { issueSessionCookie, verifySessionCookie, handleVerify } = require('./server.js');
+
+const issuedAt = 1000;
+const session = issueSessionCookie(issuedAt);
+const expiresAt = Number(verifyCookie(session).split('.')[1]);
+assert.ok(expiresAt > issuedAt, 'session expiry is after issue time');
+assert.equal(verifySessionCookie(session, issuedAt), true, 'fresh session accepted');
+assert.equal(verifySessionCookie(session, expiresAt - 1), true, 'session accepted until expiry');
+assert.equal(verifySessionCookie(session, expiresAt), false, 'session rejected at expiry');
+
+// A correctly signed, unexpired cookie for other credentials is rejected
+const otherCredentials = signCookie(`authenticated.${expiresAt}.AAAAAAAAAAAAAAAA`);
+assert.equal(
+  verifySessionCookie(otherCredentials, issuedAt),
+  false,
+  'credential mismatch rejected'
+);
+
+// The old static cookie has no expiry or credential binding
+assert.equal(verifySessionCookie(signed, issuedAt), false, 'legacy static cookie rejected');
+assert.equal(verifySessionCookie(tampered, issuedAt), false, 'tampered signature rejected');
+
+function verifyStatus(cookie) {
+  let status;
+  handleVerify(
+    { headers: { cookie: `archon_auth=${cookie}` } },
+    { writeHead: code => (status = code), end: () => {} }
+  );
+  return status;
+}
+assert.equal(verifyStatus(issueSessionCookie()), 200, '/verify accepts a current session');
+assert.equal(verifyStatus(signed), 302, '/verify redirects a legacy static cookie to login');
+
+console.log('issueSessionCookie/verifySessionCookie: all assertions passed');
 console.log('All tests passed.');
